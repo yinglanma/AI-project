@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # File: train-atari.py
-# Author: Yuxin Wu <ppwwyyxxc@gmail.com>
-
+# Created by Yuxin Wu <ppwwyyxxc@gmail.com>
+# Edited by Hongyu Xiong, Yinglan Ma, Chuan Tian 
 import numpy as np
 import tensorflow as tf
 import os, sys, re, time
@@ -27,11 +27,13 @@ from common import (play_model, Evaluator, eval_model_multithread)
 
 IMAGE_SIZE = (84, 84)
 FRAME_HISTORY = 4
-GAMMA = 0.99
+GAMMA = 1
 CHANNEL = FRAME_HISTORY * 3
 IMAGE_SHAPE3 = IMAGE_SIZE + (CHANNEL,)
+EXPLORE = 0.2 #exploration factor
+LEARNRATE = 0.001    #learning step size
 
-LOCAL_TIME_MAX = 5
+LOCAL_TIME_MAX = 25
 STEP_PER_EPOCH = 6000
 EVAL_EPISODE = 50
 BATCH_SIZE = 128
@@ -55,7 +57,7 @@ def get_player(viz=False, train=False, dumpdir=None):
     pl = HistoryFramePlayer(pl, FRAME_HISTORY)
     if not train:
         pl = PreventStuckPlayer(pl, 30, 1)
-    pl = LimitLengthPlayer(pl, 40000)
+    pl = LimitLengthPlayer(pl, 1000)
     return pl
 common.get_player = get_player
 
@@ -140,7 +142,11 @@ class MySimulatorMaster(SimulatorMaster, Callback):
         def cb(outputs):
             distrib, value = outputs.result()
             assert np.all(np.isfinite(distrib)), distrib
-            action = np.random.choice(len(distrib), p=distrib)
+            # Adding exploration
+            if np.random.random() < EXPLORE:
+                action = np.random.choice(len(distrib))
+            else:
+                action = np.random.choice(len(distrib), p=distrib)
             client = self.clients[ident]
             client.memory.append(TransitionExperience(state, action, None, value=value))
             self.send_queue.put([ident, dumps(action)])
@@ -165,7 +171,10 @@ class MySimulatorMaster(SimulatorMaster, Callback):
         mem.reverse()
         R = float(init_r)
         for idx, k in enumerate(mem):
-            R = np.clip(k.reward, -1, 1) + GAMMA * R
+            if k.reward < 10:
+                R = np.clip(k.reward,-0.05,0.05) + GAMMA * R
+            else:
+                R = np.clip(k.reward,-1,1) + GAMMA * R
             self.queue.put([k.state, k.action, R])
 
         if not isOver:
@@ -196,7 +205,7 @@ def get_config():
         optimizer=tf.train.AdamOptimizer(lr, epsilon=1e-3),
         callbacks=Callbacks([
             StatPrinter(), ModelSaver(),
-            ScheduledHyperParamSetter('learning_rate', [(80, 0.0003), (120, 0.0001)]),
+            ScheduledHyperParamSetter('learning_rate', [(10, 0.0003), (20, 0.0001)]),
             ScheduledHyperParamSetter('entropy_beta', [(80, 0.005)]),
             ScheduledHyperParamSetter('explore_factor',
                 [(80, 2), (100, 3), (120, 4), (140, 5)]),
@@ -204,7 +213,7 @@ def get_config():
             HumanHyperParamSetter('entropy_beta'),
             HumanHyperParamSetter('explore_factor'),
             master,
-            PeriodicCallback(Evaluator(EVAL_EPISODE, ['state'], ['logits']), 2),
+            PeriodicCallback(Evaluator(EVAL_EPISODE, ['state'], ['logits']), 1),
         ]),
         extra_threads_procs=[master],
         session_config=get_default_sess_config(0.5),
